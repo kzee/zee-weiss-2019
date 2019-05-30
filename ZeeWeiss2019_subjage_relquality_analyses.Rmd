@@ -1,0 +1,1866 @@
+---
+title: "Zee & Weiss (2019), *Psychology and Aging*"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+
+---
+
+This document displays the code used for the analyses in Zee & Weiss (2019), *Psychology & Aging*. [http://dx.doi.org/10.1037/pag0000349](http://dx.doi.org/10.1037/pag0000349){target="_blank"}
+
+Prepped datasets are posted along with this script. 
+To reproduce the analyses from the paper, run chunks 1-8 and then skip to chunk 13 (entitled "Merging Datasets"). 
+Code for dataset creation (chunks 9-12) is displayed to show the data prep steps taken. However, these chunks are not evaluated when knitting this file.
+
+For questions, please contact Katherine Zee at [kzee@psych.columbia.edu](mailto:kzee@psych.columbia.edu).
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = T, cache = T, tidy = F, warning = F, message = F) 
+```
+
+
+# Loading Packages
+```{r Packages, results = "hide"}
+library(tidyverse)
+library(psych)
+library(car)
+library(GGally)
+library(broom)
+library(effsize)
+```
+
+# Session Information
+- Software and Package versions 
+
+```{r package info, echo = T}
+sessionInfo()
+```
+
+
+# Defining Functions
+
+- Function for extracting valid values from MIDUS data. 
+- x = variable name, v = beginning of range of values that are not valid for analysis (e.g., missing, don't know, etc.). Values less than v are retained for analysis, otherwise replaced with `NA` so as not to be included in analysis. 
+
+```{r Cleaning function for MIDUS data}
+
+mclean <- function(x, v) {
+  as.vector(ifelse(x < v, x, NA))
+}
+
+```
+
+```{r Mean centering}
+
+center <- function (x) 
+{
+  scale(x, center = T, scale = F)
+}
+
+
+```
+
+
+```{r Simple slopes (conditional main effects) function}
+
+condslope <- function(x, z, c, y){
+  # x = name of x variable
+  # z = name of z variable (moderator)
+  # c = conditional value of z
+  # y = reg object
+  # reg function must be in this order x + z + x*z
+  out <- summary(y)
+  xz <- paste(x, z, sep=":")
+  w0.intercept <- out$coefficients["(Intercept)", "Estimate"] + ((out$coefficients[z, "Estimate"])*c)
+  w1.slope <- out$coefficients[x,"Estimate"] + ((out$coefficients[xz,"Estimate"])*c)
+  coef2.var <- out$coef[x,"Std. Error"]^2
+  coef4.var <- out$coef[xz,"Std. Error"]^2
+  out.vcov <- vcov(y)
+  cond.se <- sqrt(coef2.var + (c) * (c) * coef4.var + 2 * (c) * out.vcov[x, xz])
+  t.val <- w1.slope/cond.se
+  p.val <- 2*(1-pt(abs(t.val), y$df, lower.tail=T))
+  lower95 <- w1.slope-qt(0.975,y$df)*cond.se
+  upper95 <- w1.slope+qt(0.975,y$df)*cond.se
+  return(list(w0.intercept=format(round(w0.intercept, digits = 3), nsmall =3), 
+              w1.slope=format(round(w1.slope, digits = 3), nsmall = 3),
+              t.val=format(round(t.val, digits = 2), nsmall = 2),
+              p.val=ifelse(p.val >= .001, format(round(p.val, digits = 3), nsmall = 3), "<.001"),
+              lower95=format(round(lower95, digits = 3), nsmall = 3),
+              upper95=format(round(upper95, digits = 3), nsmall = 3)))
+}
+
+
+```
+
+```{r Regression Output to Table function}
+
+kzregtable_3digits <- function(x) {
+  require(broom)
+  modtidy <- tidy(x)
+  citidy <- tidy(confint(x))
+  citidy$term <- citidy[,1]
+  tidymerged <- merge(modtidy, citidy, by = "term")
+  tidymerged$var <- paste(x$terms)[2]
+  tidymerged$df <- x$df.residual
+  colnames(tidymerged) <- c("term", "estimate", "std.error", "t.value", 
+                            "p.value", "term2", "lower", "upper", "var", "df")
+  tidymerged$p.round <- ifelse(tidymerged$p.value < .001, "<.001", format(round(tidymerged$p.value, digits =3), nsmall = 3))
+  tidymerged$estimate.round <-  format(round(tidymerged$estimate, digits =3), nsmall = 3)
+  tidymerged$t.value.round <- format(round(tidymerged$t.value, digits =2), nsmall = 2)
+  tidymerged$lower.round <- format(round(tidymerged$lower, digits =3), nsmall = 3)
+  tidymerged$upper.round <- format(round(tidymerged$upper, digits = 3), nsmall = 3)
+  tidymerged$std.error.round <- format(round(tidymerged$std.error, digits = 3), nsmall = 3)
+  tidymerged$r <- sqrt(tidymerged$t.value^2/(tidymerged$t.value^2+tidymerged$df))
+  tidymerged$err <- (1/sqrt(nobs(x)-3))
+  tidymerged$r.round <- format(round(tidymerged$r, digits = 2), nsmall = 2)
+  tidymerged$err.round <- format(round(tidymerged$err, digits = 2), nsmall = 2)
+  tidymerged2 <- dplyr::select(tidymerged, var, term, estimate.round, std.error.round, t.value.round, df, p.round,
+                               lower.round, upper.round, r.round, err.round)
+  colnames(tidymerged2) <- c("var", "term", "estimate", "se", "t", "df", "p", "lwr", "upr", "r", "err")
+  print(tidymerged2)
+}
+
+```
+
+
+```{r t-test output table function}
+t.test.table <- function(x, grp, varname) {
+  require(broom)
+  require(effsize)
+  newdf <- cbind(tidy(t.test(x ~ grp, var.equal = T)), 
+                 cohen.d(x ~ grp, var.equal = T, na.rm = T)$estimate) %>% 
+    mutate( 
+      p = ifelse(p.value < .001, "<.001", round(p.value, digits = 3)),
+      varname = varname,
+      cohen.d = round(cohen.d(x ~ grp, var.equal = T, na.rm = T)$estimate, digits = 3),
+      diff = estimate1 - estimate2
+      ) %>%
+    mutate_if(is.numeric, funs(round(., digits = 3))) %>% 
+    select(varname, estimate1, estimate2, diff, statistic, parameter, p, conf.low, conf.high, cohen.d)
+    
+}
+
+```
+
+
+# MIDUS 1 Dataset Creation
+- Note: The MIDUS 1 dataset file we used was downloaded in June 2015. Variable names and/or formatting in this version of the dataset may differ from those in later versions. 
+
+```{r MIDUS 1 Data, eval = F}
+m1full <- read.csv("MIDUS1.csv")
+
+str(m1full$A1SMASTE)
+str(m1full$A1SCONST)
+
+
+
+m1data <- m1full %>% 
+  transmute(
+  id = M2ID,
+  m1.age = mclean(A1PAGE_M2, 100), # M1 chronological age, cleaned. max possible = 75
+  m1.age.c  = center(m1.age), # centering M1 chronological age
+  m1.subage = mclean(A1SG3, 900), # M1 subj age, cleaned
+  m1.agebias = m1.age - m1.subage, # M1 subjective age bias
+  m1.relqual = 6-mclean(A1SP6, 6), # M1 relquality. rev score so 1 = poor, 5 = excellent
+  m1.year = A1PI_YR, # year of M1 interview
+  m1.maryear = ifelse(A1PB19 == 1, 1900+mclean(A1PB18YR, 96),
+                        ifelse(A1PB19 > 1 & A1PB19 < 6, 
+                               1900+mclean(A1PB21YR, 96), NA)),
+  m1.relyears =  m1.year - m1.maryear, # Relationship length in years
+  m1.marstat = ifelse(A1PB17 == 1, 1, 
+                      ifelse(A1PB17 < 6, 0, NA)), # Marital status
+  m1.relstat = ifelse(A1PPARTN == 1, 1, 0), # R married or living w/ someone
+  
+  m1.gender = ifelse(A1PRSEX == 2, -.5, ifelse(A1PRSEX == 1, .5, NA)),
+  m1.bmi = mclean(A1SBMI, 64),
+  m1.hearttrouble = ifelse(A1PA11 == 1, 1, 
+                             ifelse(A1PA11==2, 0, NA)),
+  m1.currentsmoke = ifelse(A1PA43 ==1, 1, ifelse(A1PA43 == 2 | A1PA43 == 9, 0, NA)),
+  m1.diaghighbp = ifelse(A1SA9S ==1, 1,
+                           ifelse(A1SA9S == 2, 0, NA)),
+  
+  ### "competitor" variables:
+  m1.persmast  = ifelse(A1SMASTE < 8, A1SMASTE, NA), # personal mastery
+  m1.constraints = ifelse(A1SCONST < 8, A1SCONST, NA), # perceived constaints
+  m1.sensecon = 8-m1.constraints + m1.persmast,
+  m1.lifesat = mclean(A1SSATIS, 11), # life satisfaction
+  m1.autonomy = mclean(A1SPWBA, 22), # psychological wellbeing, autonomy. max = 21
+  m1.selfaccept = mclean(A1SPWBS, 22), # psychological wellbeing, self-acceptance, . max = 21
+  m1.persgrowth = mclean(A1SPWBG, 22), # psychological wellbeing, personal growth. max = 21 
+  m1.environmast = mclean(A1SPWBE, 22), # psychological wellbing, enviromental mastery,
+  m1.purplife = mclean(A1SPWBU, 22), # psychological wellbing, purpose in life
+  m1.agreeable = mclean(A1SAGREE, 5), # agreeableness, max = 4
+  m1.conscientious = mclean(A1SCONS, 5) # conscientiousness, max = 4
+) 
+
+write.csv(m1data, "Zee&Weiss_MIDUS1.csv", row.names = F)
+remove(m1full)
+
+```
+
+# MIDUS 2 Dataset Creation
+- Note: The MIDUS 2 dataset file we used was downloaded in June 2015. Variable names and/or formatting in this version of the dataset may differ from those in later versions. 
+
+```{r MIDUS 2 Data, eval = F}
+
+m2full <- read.csv("MIDUS2.csv")
+
+
+### Functions to help compute M2 date
+substrRight <- function(x, n){
+  substr(x, nchar(x)-n+1, nchar(x))
+}
+
+
+
+first.word <- function(my.string){
+  unlist(strsplit(my.string, "-"))[1]
+}
+
+
+
+second.word <- function(my.string){
+  unlist(strsplit(my.string, "-"))[2]
+}
+
+
+m2data <- m2full %>% 
+  transmute(
+    id = M2ID,
+    m2.age = mclean(B1PAGE_M2, 100), # M2 chronological age, cleaned. Max valid = 84
+    m2.subage = mclean(B1SE14, 900), # M2 subj age, cleaned. Min = 3, Max = 150. 
+    m2.agebias = m2.age - m2.subage,
+    m2.relqual = 6-mclean(B1SL6, 6), # rev score so 1 = poor, 5 = excellent
+    m2.subjhealth = 6-mclean(B1PA1, 6), # Physical health, self-evaluated. rev score so 5 = excellent,1 = poor
+    m2.edu = mclean(B1PB1, 13), # what is highest level of education completed
+    m2.date.char = as.character(B1PIDATE),
+    m2.year = 2000 + as.numeric(substrRight(m2.date.char, 2)),
+    m2.day = sapply(m2.date.char, first.word),
+    m2.day2 = ifelse(as.numeric(m2.day) < 10, paste("0", m2.day, sep = ""), m2.day),
+    m2.month = sapply(m2.date.char, second.word),
+    m2.month2 = car::recode(m2.month, "'Jan' = 01; 'Feb' = 02; 'Mar' = 03; 'Apr' = 04;
+                            'May' = 05; 'Jun' = 06; 'Jul' = 07; 'Aug' = 08; 'Sep' = 09; 
+                            'Oct' = 10; 'Nov' = 11; 'Dec' = 12"),
+    m2.month2b = ifelse(m2.month2 < 10, paste("0", m2.month2, sep = ""), m2.month2),
+    m2.datefinal = paste(m2.year, m2.month2b, m2.day2, sep = ""),
+    m2.datefinal2 = paste(m2.year, m2.month2b, m2.day2, sep = "-"),
+    m2.maryear = ifelse(B1PB20 == 1, mclean(B1PB21Y, 2004.1),
+                        ifelse(B1PB20 > 1 & B1PB20 < 90, mclean(B1PB26Y, 2004.1), NA)),
+   m2.relyears = m2.year - m2.maryear,
+   m2.cohab = ifelse(B1PB30 == 1, 1, 
+                     ifelse(B1PB30 == 2, 0, NA)), #  Are you currently living with someone in a steady, marriage-like relationship # 1 = yes, 2 = no, 7 = don't know, 8 = refused, 9 = inapp
+   m2.marstat = ifelse(B1PB19 == 1, 1,
+                       ifelse(B1PB19 < 6, 0, NA)), # Marital status currently
+   m2.relstat = ifelse(B1PB19 == 1 | m2.cohab == 1, 1, 
+                       ifelse(is.na(m2.cohab) == T | is.na(m2.marstat) == T, NA, 0)), # Marital status currently
+   
+   m2.gender = ifelse(B1PRSEX == 1, .5, -.5), # male = .5, female = -.5
+   m2.bmi = mclean(B1SBMI, 83), # max = 82.307
+   m2.hearttrouble = ifelse(B1PA7 == 1, 1, 
+                             ifelse(B1PA7==2, 0, NA)), # 1 = yes, 0 = no
+   m2.currentsmoke = ifelse(B1PA39 ==1, 1, 0), # "No" or "Inapp" coded as 0 to indicate non-smoker
+   m2.diaghighbp = ifelse(B1PA7BC ==1, 1,
+                           ifelse(B1PA7BC == 97, NA, 0)),
+   
+   ### "competitor" variables
+  m2.sensecon = mclean(B1SCTRL, 8), # sense of control. max = 7
+  m2.lifesat = mclean(B1SSATIS, 11), # life satisfaction. max = 10 
+  m2.autonomy = mclean(B1SPWBA1, 22), # psychological wellbeing, autonomy. 3-item. max = 21
+  m2.selfaccept = mclean(B1SPWBS1, 22), # psychological wellbeing, self-acceptance, . max = 21
+  m2.persgrowth = mclean(B1SPWBG1, 22), # psychological wellbeing, personal growth. max = 21 
+  m2.environmast = mclean(B1SPWBE1, 22), # psychological wellbing, enviromental mastery,
+  m2.purplife = mclean(B1SPWBU1, 22), # psychological wellbing, purpose in life
+  m2.agreeable = mclean(B1SAGREE, 5), # agreeableness, max = 4
+  m2.conscientious = mclean(B1SCONS1, 5) # conscientiousness, max = 4
+
+
+   )
+
+
+write.csv(m2data, "Zee&Weiss_MIDUS2.csv", row.names = F)
+remove(m2full)
+
+
+```
+
+# MIDUS Biomarker Dataset Creation
+- Note: The MIDUS Biomarker dataset file we used was downloaded in May 2018. Variable names and/or formatting in this version of the dataset may differ from those in later versions. 
+
+```{r MIDUS Bio Data, eval = F}
+mbiofull <- read.csv("MIDUSbio.csv")
+
+mbiodata <- mbiofull %>% 
+  transmute(
+    id = M2ID,
+    
+  ## Biomarkers Covariates ##   
+    gender = ifelse(B1PGENDER == 1, .5, -.5), # .5 = male, -.5 = female
+    bmi = mclean(B4PBMI, 66), # max = 65.09
+    diaghd = ifelse(B4H1AD == 1, 1, 
+                       ifelse(B4H1AD == 8, NA, 0)), # physician diagnosed heart disease. 1 = yes
+    diaghighbp = ifelse(B4H1BD == 1, 1, 
+                          ifelse(B4H1BD ==  8, NA, 0)), # physician diagnosed high bp. 1 = yes
+    bpmeds = ifelse(B4XBPD ==  1, 1, 
+                       ifelse(B4XBPD ==  2, 0, NA)),
+    currentsmoke = ifelse(B4H26A ==  1, 1, 
+                             ifelse(B4H26A ==  2, 0, 
+                                    ifelse(B4H26A ==  9, 0, NA))), # current smoker Yes = 1, 2 = No
+    formersmoke = ifelse(B4H26 ==  1, 1, 
+                            ifelse(B4H26 ==  2, 0, NA)), 
+    smoker = ifelse(currentsmoke ==  1 | formersmoke ==  1, 1, 
+                       ifelse(currentsmoke ==  0 & formersmoke ==  0, 0, NA)),
+    resprate = mclean(B4P1E, 29), # respiration rate. max = 38
+  
+  
+  ## HRV ##
+  b1.hrvavelog = mclean(B4VB1LHF, 10), # 1st epoch. max = 9.64 
+  b2.hrvavelog = mclean(B4VB2LHF, 10), # 2nd epoch. max = 9.68
+  hrvavelog = (b1.hrvavelog + b2.hrvavelog)/2, # ave across epochs
+
+  ## Date information ##
+  bioyear = B4ZCOMPY,
+  biomonth = B4ZCOMPM,
+  biomonth2 = ifelse(biomonth < 10, paste("0", biomonth, sep = ""), biomonth),
+  biodate = paste(bioyear, biomonth2, "01", sep = "")
+
+  )
+
+write.csv(mbiodata, "Zee&Weiss_MIDUSBio.csv", row.names = F)
+remove(mbiofull)
+```
+
+
+# MIDUS Cognitive Project Dataset Creation 
+- Note: The MIDUS Cognitive Project dataset file we used was downloaded in June 2015. Variable names and/or formatting in this version of the dataset may differ from those in later versions. 
+
+```{r MIDUS Cog Data, eval = F}
+
+mcog <- read.csv("MIDUSIIcognitive.csv") 
+
+mcog = mcog %>% 
+  transmute(
+    id = M2ID,
+    memperf.z = mclean(B3TEMZ3, 4), # max = 3.83
+    cogyear = B3PIDATE_YR,
+    cogmonth = B3PIDATE_MO,
+    cogmonth2 = ifelse(cogmonth < 10, paste("0", cogmonth, sep = ""), cogmonth),
+    cogdate = paste(cogyear, cogmonth2, "01", sep = ""),
+    cogdate2 = paste(cogyear, cogmonth2, "01", sep = "-"),
+    cogdate2  = as.Date(cogdate2)
+    
+  )
+    
+write.csv(mcog, "Zee&Weiss_MIDUSCog.csv", row.names = F)
+remove(mcog)
+```
+
+
+
+# Merging Datasets
+```{r Merging}
+m1data <- read.csv("Zee&Weiss_MIDUS1.csv")
+m2data <- read.csv("Zee&Weiss_MIDUS2.csv")
+mbiodata <- read.csv("Zee&Weiss_MIDUSBio.csv")
+mcogdata <- read.csv("Zee&Weiss_MIDUSCog.csv")
+
+
+m2m1 <- dplyr::full_join(m1data, m2data, by = "id")
+
+m_all1 <- dplyr::full_join(m2m1, mbiodata, by = "id") %>% select(-contains("X."))
+m_all2 <- dplyr::full_join(m_all1, mcogdata, by = "id")
+m_all <- m_all2
+head(m_all)
+```
+
+# Sample Size Information
+```{r}
+##### sample size of Ps with rel quality ratings in cogproj: ######
+
+m_all$relqualdata <- ifelse(is.na(m_all$m1.relqual) == F & is.na(m_all$m2.relqual) == F, 1, 0)
+m_all$hrvdata <- ifelse(is.na(m_all$hrvavelog) == F, 1, 0)
+m_all$memdata <- ifelse(is.na(m_all$memperf.z) == F, 1, 0)
+m_all$ydata <- ifelse(is.na(m_all$memperf.z) == F | is.na(m_all$hrvavelog) == F, 1, 0)
+table(m_all$relqualdata, m_all$hrvdata)
+table(m_all$relqualdata, m_all$ydata)
+
+```
+
+
+# Checking Dataset for Extreme Values
+```{r Extreme values}
+# scale = standardize
+summary(scale(m_all$m1.subage)) # range = -3.14 to 6.42 SD from the mean
+summary(scale(m_all$m2.subage)) # range = -3.21 to 7.62 SD from the mean
+summary(scale(m_all$hrvavelog)) # range = -3.12 to 3.72 SD from the mean
+summary(scale(m_all$m1.relqual)) # range = -2.82 to 1.04 SD from the mean
+summary(scale(m_all$m2.relqual)) # range = -2.97 to .95 SD from the mean
+
+```
+
+# Prep Data for analysis 
+- Select cases within 4 SD of mean. Only applies to subjective age values. 
+- Mean center values for analysis
+
+```{r Filter out extreme values & centering}
+
+
+elapsed_months <- function(end_date, start_date) {
+  ed <- as.POSIXlt(end_date)
+  sd <- as.POSIXlt(start_date)
+  12 * (ed$year - sd$year) + (ed$mon - sd$mon)
+}
+
+
+m_all2 <- subset(m_all, abs(scale(m1.subage)) < 4 | abs(scale(m2.subage)) < 4) 
+# filter out values falling more than 4 SD from mean on subage
+
+
+# Note: Values centered on full sample means. 
+# Interaction effects do not depend on centering.
+# Generally, main effects were not appreciably different 
+# when using means from the analyic sample.
+
+m_all2 <- m_all2 %>%   
+    mutate(
+    
+    ## M1 variables 
+    
+    m1.agebias = m1.age - m1.subage, 
+    m1.agebias.c = center(m1.agebias),
+    m1.age.c = center(m1.age),
+    m1.ageave = (m1.agebias + m1.age)/2, # age level
+    m1.ageave.c = center(m1.ageave), 
+    m1.relqual.c = center(m1.relqual),
+    m1.relyears.c = center(m1.relyears),
+    m1.relsubjage = m1.agebias/m1.age,
+    m1.relsubjage.c = center(m1.relsubjage),
+    m1.bmi.c = center(m1.bmi),
+
+
+    ## M2 variables 
+    
+    m2.agebias = m2.age - m2.subage,  
+    m2.agebias.c = center(m2.agebias),
+    m2.age.c = center(m2.age),
+    m2.ageave = (m2.agebias + m2.age)/2, # age level
+    m2.ageave.c = center(m2.ageave),
+    m2.relqual.c = center(m2.relqual),
+    m2.relyears.c = center(m2.relyears), 
+    m2.subjhealth.c = center(m2.subjhealth),
+    m2.relsubjage = m2.agebias/m2.age, # diff operationalization of subj age bias 
+    m2.relsubjage.c = center(m2.relsubjage),
+    m2.edu.c = center(m2.edu),
+    m2.datefinal2date = as.Date(m2.datefinal2),
+    m2.bmi.c = center(m2.bmi),
+
+
+    ## Biomarkers Project variables
+    
+    bmi.c = center(bmi),
+    resprate.c = center(resprate),
+    mbio_to_m1 = bioyear - m1.year,
+    mbio_to_m1.c = center(mbio_to_m1),
+    mbio_to_m2 = bioyear - m2.year,
+    mbio_to_m2.c = center(mbio_to_m2),
+    
+    
+    ## Cognitive Project variables
+    
+    cog_to_m1 = cogyear-m1.year,
+    cog_to_m1.c = center(cog_to_m1),
+    cog_to_m2_mos = elapsed_months(cogdate2, m2.datefinal2),
+    cog_to_m2_mos.c = center(cog_to_m2_mos),
+    cog_to_m2_binary = ifelse(cogdate >= m2.datefinal, 1, 0),
+    cog_to_m2 = cogyear-m2.year,
+    cog_to_m2.c = center(cog_to_m2),
+    bio_to_cog = bioyear-cogyear,
+    bio_to_cog.c = center(bio_to_cog),
+    
+    m1.psycwb = rowMeans(cbind(m1.autonomy, m1.selfaccept, m1.persgrowth, m1.environmast, m1.purplife)), # composite psychological wellbeing
+    m2.psycwb = rowMeans(cbind(m2.autonomy, m2.selfaccept, m2.persgrowth, m2.environmast, m2.purplife))
+    
+    
+    ) 
+
+
+
+m <- subset(m_all2, m1.agebias < 40)
+# m1.agebias < 40 = to remove visible extreme outlying value in plots. Participants with extreme neg values not included in analyses due to missing obs for focal variables
+
+
+# Keep this version of dataset with extreme obs still included
+# for use in some follow up analyses
+mnosub <- m_all2 
+```
+
+# Time between MIDUS Biomarker and M1 and M2
+```{r}
+summary(m$mbio_to_m2) # units = months. Average = 2.16 months
+summary(m$mbio_to_m1) # units = months. Average = 11.21 months
+
+```
+
+# HRV Analyses - with M1 predictors
+
+## Full Model
+- Focal Predictor = `m1.agebias.c:m1.relqual.c`   
+```{r HRV M1 analyses}
+hrvmodel_m1 <- lm(hrvavelog ~  m1.ageave.c*m1.agebias.c*m1.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m2.relqual.c + m1.relyears.c, data = m)
+summary(hrvmodel_m1)
+
+```
+
+- Number of observations in this analysis
+```{r}
+nobs(hrvmodel_m1)
+```
+
+## Basic Model (all interactions but no covariates)
+
+```{r HRV M1 Basic Model}
+hrvmodel_m1_nocov <- lm(hrvavelog ~  m1.ageave.c*m1.agebias.c*m1.relqual.c, data = hrvmodel_m1$model)
+summary(hrvmodel_m1_nocov)
+```
+
+## Main Effects only model (no interactions and no covariates)
+
+```{r HRV M1 main effects Model}
+hrvmodel_m1_mes <- lm(hrvavelog ~  m1.ageave.c + m1.agebias.c + m1.relqual.c, data = hrvmodel_m1$model)
+summary(hrvmodel_m1_mes)
+```
+
+## Simple effects (using Full Model)
+- Effect of subjective age bias at +1 SD on relationship quality
+```{r}
+condslope("m1.agebias.c", "m1.relqual.c", sd(m$m1.relqual.c, na.rm= T), hrvmodel_m1)
+```
+
+
+- Effect of subjective age bias at +1 SD on relationship quality
+```{r}
+condslope("m1.agebias.c", "m1.relqual.c", -1*sd(m$m1.relqual.c, na.rm= T), hrvmodel_m1)
+
+```
+
+## Alternative Models
+
+### Dropping M2 Rel Qual as coviarate
+- Same model as above but dropping M2 rel quality as covariate
+- Reported in a footnotes and Supplemental Materials
+```{r HRV M1 dropping M2 RQ as cov}
+hrvmodel_m1_nom2 <- lm(hrvavelog ~ m1.ageave.c*m1.agebias.c*m1.relqual.c + 
+                         m2.subjhealth.c  + 
+                         gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                         m1.relyears.c, data = m)
+summary(hrvmodel_m1_nom2)
+hrvmodel_m1_nom2_sum <- subset(kzregtable_3digits(hrvmodel_m1_nom2), term == "m1.agebias.c:m1.relqual.c")
+
+nom2low <- condslope("m1.agebias.c", "m1.relqual.c", -1*sd(m$m1.relqual.c, na.rm=T), hrvmodel_m1_nom2)
+nom2high <- condslope("m1.agebias.c", "m1.relqual.c", sd(m$m1.relqual.c, na.rm=T), hrvmodel_m1_nom2)
+
+
+```
+
+
+### Including Extreme Observations
+- Model with extreme observation included
+- Reported in a footnote
+```{r HRV M1 analyses with extreme obs M1 SAB > 40}
+hrvmodel_m1_extreme <- lm(hrvavelog ~  m1.ageave.c*m1.agebias.c*m1.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m2.relqual.c + m1.relyears.c, data = mnosub)
+summary(hrvmodel_m1_extreme)
+nobs(hrvmodel_m1_extreme)
+
+
+
+```
+
+### Controlling for "Competitors"
+- Model with "competitor" variables to rule out potential alternative explanations.
+```{r HRV M1 competitor analyses, MEs}
+hrvmodel_m1_comp <- lm(hrvavelog ~  m1.ageave.c*m1.agebias.c *m1.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m2.relqual.c + m1.relyears.c +
+                      
+                  center(m1.sensecon) + 
+                   center(m1.lifesat) + 
+                    center(m1.psycwb) + 
+                    center(m1.agreeable) + 
+                    center(m1.conscientious)
+                  ,
+                    
+                    
+                    data = m)
+summary(hrvmodel_m1_comp)
+```
+
+```{r HRV M1 competitor analyses, interaction with sense of control}
+lm(hrvavelog ~  m1.ageave.c*m1.agebias.c*m1.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m2.relqual.c + m1.relyears.c +
+                      
+                  m1.ageave.c*m1.agebias.c*center(m1.sensecon) ,
+                    
+                    
+                    data = m) %>% summary() 
+```
+
+```{r HRV M1 competitor analyses, interaction with agreeableness}
+lm(hrvavelog ~  m1.ageave.c*m1.agebias.c*m1.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m2.relqual.c + m1.relyears.c +
+                      
+                  m1.ageave.c*m1.agebias.c*center(m1.agreeable) ,
+                  data = m) %>% summary() 
+```
+
+```{r HRV M1 competitor analyses, interaction with conscientiousness}
+lm(hrvavelog ~  m1.ageave.c*m1.agebias.c*m1.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m2.relqual.c + m1.relyears.c +
+                      
+                  m1.ageave.c*m1.agebias.c*center(m1.conscientious) ,
+                    
+                    
+                    data = m) %>% summary() 
+```
+
+```{r HRV M1 competitor analyses, interaction with life satisfaction}
+lm(hrvavelog ~  m1.ageave.c*m1.agebias.c*m1.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m2.relqual.c + m1.relyears.c +
+                      
+                  m1.ageave.c*m1.agebias.c*center(m1.lifesat) ,
+                    
+                    
+                    data = m) %>% summary() 
+```
+
+
+```{r HRV M1 competitor analyses, interaction with psychological wellbeing}
+lm(hrvavelog ~  m1.ageave.c*m1.agebias.c*m1.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m2.relqual.c + m1.relyears.c +
+                      
+                  m1.ageave.c*m1.agebias.c*center(m1.psycwb) ,
+                    
+                    
+                    data = m) %>% summary()
+```
+
+## Analyses with Relative Subjective Age (SAB-PD)
+- Using relative subjective age
+```{r HRV M1 relative subj age}
+hrvmodel_m1_relsubjage <- lm(hrvavelog ~ m1.relsubjage.c*m1.relqual.c + 
+                            m2.subjhealth.c  + 
+                            gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c +
+                            m2.relqual.c + m1.relyears.c, data = m)
+summary(hrvmodel_m1_relsubjage)
+```
+
+
+```{r HRV M1 relative subj age no cov}
+hrvmodel_m1_relsubjage_nocov <- lm(hrvavelog ~ m1.relsubjage.c*m1.relqual.c, data = hrvmodel_m1_relsubjage$model)
+summary(hrvmodel_m1_relsubjage_nocov)
+```
+
+
+```{r HRV M1 relative subj age MEs only}
+hrvmodel_m1_relsubjage_mes <- lm(hrvavelog ~ m1.relsubjage.c+m1.relqual.c, data = hrvmodel_m1_relsubjage$model)
+summary(hrvmodel_m1_relsubjage_mes)
+```
+
+## Analyses with Chronological Age 
+- Using chronological age instead of age level
+```{r}
+lm(hrvavelog ~  m1.age.c*m1.agebias.c*m1.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m2.relqual.c + m1.relyears.c, data = m) %>% summary()
+```
+
+
+# HRV Analyses - with M2 predictors
+
+## Full Model
+- Focal Predictor = `m2.agebias.c:m2.relqual.c`  
+```{r HRV M2 analyses}
+hrvmodel <- lm(hrvavelog ~  m2.ageave.c*m2.agebias.c*m2.relqual.c + 
+                 m2.subjhealth.c  + 
+                 gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                 m1.relqual.c + m2.relyears.c, data = m)
+summary(hrvmodel)
+```
+
+- Number of observations in this analysis
+```{r}
+nobs(hrvmodel)
+```
+
+## Simple effects
+- Effect of subjective age bias at +1 SD on relationship quality
+```{r}
+condslope("m2.agebias.c", "m2.relqual.c", sd(m$m2.relqual.c, na.rm= T), hrvmodel)
+```
+
+- Effect of subjective age bias at -1 SD on relationship quality
+```{r}
+condslope("m2.agebias.c", "m2.relqual.c", -1*sd(m$m2.relqual.c, na.rm= T), hrvmodel)
+
+```
+
+```{r eval = F}
+nmodel <- lm(hrvavelog ~  m2.ageave.c*m2.agebias.c*m2.relqual.c + 
+               m2.subjhealth.c  + 
+               gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+               m1.relqual.c + m2.relyears.c, data = m)
+summary(nmodel)
+nmodel$model
+summary(nmodel$model$m2.age)
+```
+
+
+## Basic Model 
+- Focal Predictor = `m2.agebias.c:m2.relqual.c`   
+- Interaction of relationship quality and subj age is significant
+```{r HRV M2 Basic Model}
+hrvmodel_m2_nocov <- lm(hrvavelog ~  m2.ageave.c*m2.agebias.c*m2.relqual.c, data = hrvmodel$model)
+summary(hrvmodel_m2_nocov)
+```
+
+
+## Main effects Model 
+```{r HRV M2 main effects Model}
+hrvmodel_m2_mes <- lm(hrvavelog ~  m2.ageave.c + m2.agebias.c + m2.relqual.c, data = hrvmodel$model)
+summary(hrvmodel_m2_mes)
+```
+
+
+## Alternative Models
+
+### Without M1 Rel Qual as Covariate
+- Same model as above but dropping M1 rel quality as covariate
+
+```{r}
+hrvmodel_nom1 <- lm(hrvavelog ~  m2.ageave.c*m2.agebias.c*m2.relqual.c + 
+                 m2.subjhealth.c  + 
+                 gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                 m2.relyears.c, data = m)
+summary(hrvmodel_nom1)
+
+```
+
+### Analyses with Competitor Variables
+- Model with "competitor" variables to rule out potential alternative explanations.
+-- satisfaction with life, psychological wellbeing, sense of control
+```{r HRV M2 competitor analyses, MEs}
+
+hrvmodel_comp <- lm(hrvavelog ~  m2.ageave.c*m2.agebias.c*m2.relqual.c + 
+                 m2.subjhealth.c  + 
+                 gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                 m1.relqual.c + m2.relyears.c +
+                   
+                   center(m2.sensecon) + 
+                   center(m2.lifesat) + 
+                   center(m2.psycwb) +
+                   center(m2.agreeable) + 
+                    center(m2.conscientious), 
+                 
+                 data = m)
+summary(hrvmodel_comp)
+
+```
+
+```{r HRV m2 competitor analyses, interaction with sense of control}
+lm(hrvavelog ~  m2.ageave.c*m2.agebias.c*m2.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m1.relqual.c + m2.relyears.c +
+                      
+                  m2.ageave.c*m2.agebias.c*center(m2.sensecon) ,
+                    
+                    
+                    data = m) %>% summary() 
+```
+
+```{r HRV m2 competitor analyses, interaction with agreeableness}
+lm(hrvavelog ~  m2.ageave.c*m2.agebias.c*m2.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m1.relqual.c + m2.relyears.c +
+                      
+                  m2.ageave.c*m2.agebias.c*center(m2.agreeable) ,
+                    
+                    
+                    data = m) %>% summary()
+```
+
+```{r HRV m2 competitor analyses, interaction with conscientiousness}
+lm(hrvavelog ~  m2.ageave.c*m2.agebias.c*m2.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m1.relqual.c + m2.relyears.c +
+                      
+                  m2.ageave.c*m2.agebias.c*center(m2.conscientious) ,
+                    
+                    
+                    data = m) %>% summary() 
+```
+
+```{r HRV m2 competitor analyses, interaction with life satis}
+lm(hrvavelog ~  m2.ageave.c*m2.agebias.c*m2.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m1.relqual.c + m2.relyears.c +
+                      
+                  m2.ageave.c*m2.agebias.c*center(m2.lifesat) ,
+                    
+                    
+                    data = m) %>% summary() 
+```
+
+```{r HRV m2 competitor analyses, interaction with psych wb}
+lm(hrvavelog ~  m2.ageave.c*m2.agebias.c*m2.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m1.relqual.c + m2.relyears.c +
+                      
+                  m2.ageave.c*m2.agebias.c*center(m2.psycwb) ,
+                    
+                    
+                    data = m) %>% summary() 
+```
+
+## Analyses with Relative Subjective Age (SAB-PD)
+
+- Using relative subjective age
+```{r HRV M2 relative subj age}
+hrvmodel_m2_relsubjage <- lm(hrvavelog ~ m2.relsubjage.c*m2.relqual.c + 
+                            m2.subjhealth.c  + 
+                            gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c +
+                            m1.relqual.c + m2.relyears.c, data = m)
+summary(hrvmodel_m2_relsubjage)
+```
+
+
+```{r HRV M2 relative subj age nocov}
+hrvmodel_m2_relsubjage_nocov <- lm(hrvavelog ~ m2.relsubjage.c*m2.relqual.c, data = hrvmodel_m2_relsubjage$model)
+summary(hrvmodel_m2_relsubjage_nocov)
+```
+
+```{r HRV M2 relative subj age MEs}
+hrvmodel_m2_relsubjage_mes <- lm(hrvavelog ~ m2.relsubjage.c+m2.relqual.c, data = hrvmodel_m2_relsubjage$model)
+summary(hrvmodel_m2_relsubjage_mes)
+```
+
+## Time since Wave 2 as Covariate
+- Using time since Wave 2 as a covariate 
+```{r HRV analyses with time since Wave 2 as covariate}
+hrvmodel_time <- lm(hrvavelog ~  m2.ageave.c*m2.agebias.c*m2.relqual.c + 
+                 m2.subjhealth.c  + 
+                 gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                 m1.relqual.c + m2.relyears.c +
+                 mbio_to_m2.c, data = m)
+summary(hrvmodel)
+
+```
+## Analyses with Chronological Age
+- Using chronological age instead of age level
+```{r}
+lm(hrvavelog ~  m2.age.c*m2.agebias.c*m2.relqual.c + 
+                 m2.subjhealth.c  + 
+                 gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                 m1.relqual.c + m2.relyears.c, data = m) %>% summary()
+```
+
+
+# Prepping Variables for Cognitive Analyses
+
+Check for extreme values
+```{r}
+summary(scale(m$memperf.z)) # memory performance is already in SD units. All within 4 SD
+
+```
+
+```{r}
+summary(m$cog_to_m2_mos) # On average, cognitive took place 4.8 months after Wave 2
+
+```
+
+# Memory Analyses with M1
+
+## Full Model
+
+```{r Memory M1 full model }
+memmodel_m1 <- lm(memperf.z ~ m1.ageave.c*m1.agebias.c*m1.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m2.relqual.c + m1.relyears.c, data = m)
+summary(memmodel_m1)
+nobs(memmodel_m1)
+```
+
+
+## Simple effects (using Full Model)
+- Effect of subjective age bias at +1 SD on relationship quality
+```{r}
+condslope("m1.agebias.c", "m1.relqual.c", sd(m$m1.relqual.c, na.rm= T), memmodel_m1)
+```
+
+
+- Effect of subjective age bias at +1 SD on relationship quality
+```{r}
+condslope("m1.agebias.c", "m1.relqual.c", -1*sd(m$m1.relqual.c, na.rm= T), memmodel_m1)
+
+```
+
+
+## Basic Model 
+```{r Memory analyses basic model M1}
+memmodel_m1_nocov <- lm(memperf.z ~ m1.ageave.c*m1.agebias.c*m1.relqual.c, data = memmodel_m1$model)
+summary(memmodel_m1_nocov)
+
+memmodel_m1_nocov_noint <- lm(memperf.z ~ m1.ageave.c+m1.agebias.c+m1.relqual.c, data = memmodel_m1$model)
+summary(memmodel_m1_nocov_noint)
+
+memmodel_m1_nocov_noint2 <- lm(memperf.z ~ m1.ageave.c+m1.relqual.c*m1.agebias.c, data = memmodel_m1$model)
+summary(memmodel_m1_nocov_noint2)
+
+memmodel_m1_nocov_age <- lm(memperf.z ~ m1.ageave.c+m1.relqual.c*m1.agebias.c, data = memmodel_m1$model)
+summary(memmodel_m1_nocov_age)
+```
+
+
+## Main effects model
+```{r Memory analyses main effects model M1}
+memmodel_m1_mes <- lm(memperf.z ~ m1.ageave.c+m1.agebias.c+m1.relqual.c, data = memmodel_m1$model)
+summary(memmodel_m1_mes)
+```
+
+## Full Model - sample includes those WITHOUT Biomarker data
+- uses different covariations (from M2)
+```{r}
+memmodel_m1full <- lm(memperf.z ~ m1.ageave.c*m1.agebias.c*m1.relqual.c + 
+                    m2.subjhealth.c  + 
+                    m1.gender + m2.bmi.c + m2.hearttrouble + m2.currentsmoke + m2.diaghighbp + m2.edu.c + 
+                    m2.relqual.c + m1.relyears.c, data = m)
+summary(memmodel_m1full)
+nobs(memmodel_m1full)
+```
+
+
+## Alternative Models
+
+### Models with "Competitors"
+- Model with "competitor" variables to rule out potential alternative explanations.
+```{r Memory M1 competitor analyses, MEs}
+memmodel_m1_comp <- lm(memperf.z ~  m1.ageave.c*m1.agebias.c*m1.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m2.relqual.c + m1.relyears.c +
+                    
+                   center(m1.sensecon) + 
+                   center(m1.lifesat) + 
+                   center(m1.psycwb) + 
+                    center(m1.agreeable) + 
+                    center(m1.conscientious)
+                     ,
+                   
+                   data = m)
+summary(memmodel_m1_comp)
+```
+
+
+```{r Memory m1 competitor analyses, interaction with sense of control}
+lm(memperf.z ~  m1.ageave.c*m1.agebias.c*m1.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m2.relqual.c + m1.relyears.c +
+                      
+                  m1.ageave.c*m1.agebias.c*center(m1.sensecon) ,
+                    
+                    
+                    data = m) %>% summary() 
+```
+
+```{r Memory m1 competitor analyses, interaction with agreeableness}
+lm(memperf.z ~  m1.ageave.c*m1.agebias.c*m1.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m2.relqual.c + m1.relyears.c +
+                      
+                      
+                  m1.ageave.c*m1.agebias.c*center(m1.agreeable) ,
+                    
+                    
+                    data = m) %>% summary()
+```
+
+```{r Memory m1 competitor analyses, interaction with conscientiousness}
+lm(memperf.z ~  m1.ageave.c*m1.agebias.c*m1.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m2.relqual.c + m1.relyears.c +
+                      
+                      
+                  m1.ageave.c*m1.agebias.c*center(m1.conscientious) ,
+                    
+                    
+                    data = m) %>% summary() 
+```
+
+
+```{r Memory m1 competitor analyses, interaction with life satis}
+lm(memperf.z ~  m1.ageave.c*m1.agebias.c*m1.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m2.relqual.c + m1.relyears.c +
+                      
+                      
+                  m1.ageave.c*m1.agebias.c*center(m1.lifesat) ,
+                    
+                    
+                    data = m) %>% summary() 
+```
+
+
+```{r Memory m1 competitor analyses, interaction with psycwb}
+lm(memperf.z ~  m1.ageave.c*m1.agebias.c*m1.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m2.relqual.c + m1.relyears.c +
+                      
+                      
+                  m1.ageave.c*m1.agebias.c*center(m1.psycwb) ,
+                    
+                    
+                    data = m) %>% summary() 
+```
+
+### Analyses using Relative Subjective Age (SAB-PD)
+- Using relative subjective age
+```{r Memory M1 relative subj age}
+memmodel_m1_relsubjage <- lm(memperf.z ~ m1.relsubjage.c*m1.relqual.c + 
+                            m2.subjhealth.c  + 
+                            gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c +
+                            m2.relqual.c + m1.relyears.c, data = m)
+summary(memmodel_m1_relsubjage)
+```
+
+```{r Memory M1 relative subj age no cov}
+memmodel_m1_relsubjage_nocov <- lm(memperf.z ~ m1.relsubjage.c*m1.relqual.c, data = memmodel_m1_relsubjage$model)
+summary(memmodel_m1_relsubjage_nocov)
+```
+
+
+```{r Memory M1 relative subj age MEs}
+memmodel_m1_relsubjage_mes <- lm(memperf.z ~ m1.relsubjage.c+m1.relqual.c, data = memmodel_m1_relsubjage$model)
+summary(memmodel_m1_relsubjage_mes)
+```
+
+### Analyses with Chronological Age
+- Using chronological age instead of age level
+```{r}
+lm(memperf.z ~ m1.age.c*m1.agebias.c*m1.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m2.relqual.c + m1.relyears.c, data = m) %>% summary()
+```
+
+
+# Memory Analyses with M2
+
+## Full Model
+
+```{r Memory M2 full model }
+
+memmodel <- lm(memperf.z ~ m2.ageave.c*m2.agebias.c*m2.relqual.c + 
+                 m2.subjhealth.c  + 
+                 gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                 m1.relqual.c + m2.relyears.c, data = m)
+summary(memmodel)
+nobs(memmodel)
+```
+## Simple effects (using Full Model)
+- Effect of subjective age bias at +1 SD on relationship quality
+```{r}
+condslope("m2.agebias.c", "m2.relqual.c", sd(m$m2.relqual.c, na.rm= T), memmodel)
+```
+
+
+- Effect of subjective age bias at +1 SD on relationship quality
+```{r}
+condslope("m2.agebias.c", "m2.relqual.c", -1*sd(m$m2.relqual.c, na.rm= T), memmodel)
+
+```
+
+
+## Basic Model - same sample 
+```{r Memory M2 basic model}
+
+memmodel_nocov <-  lm(memperf.z ~ m2.ageave.c*m2.agebias.c*m2.relqual.c, data = memmodel$model)
+summary(memmodel_nocov)
+nobs(memmodel_nocov)
+```
+
+## Main effects Model - same sample
+```{r Memory M2 main effects model}
+
+memmodel_m2_mes <-  lm(memperf.z ~ m2.ageave.c+m2.agebias.c+m2.relqual.c, data = memmodel$model)
+summary(memmodel_m2_mes)
+```
+
+### Full Model - sample includes those without Biomarker data
+- Uses covariates from M2 not Biomarkers
+```{r Memory Analyses M2 full sample}
+memmodel_full <- lm(memperf.z ~ m2.ageave.c*m2.agebias.c*m2.relqual.c + 
+                    m2.subjhealth.c  + 
+                    m2.gender + m2.bmi.c + m2.hearttrouble + m2.currentsmoke + m2.diaghighbp + m2.edu.c + 
+                    m1.relqual.c + m2.relyears.c, data = m)
+summary(memmodel_full)
+nobs(memmodel_full)
+```
+
+
+## Alternative Models
+
+### Analyses with "Competitors"
+- Model with "competitor" variables to rule out potential alternative explanations.
+```{r Memory M2 competitor analyses, MEs}
+memmodel_m2_comp <- lm(memperf.z ~  m2.ageave.c*m2.agebias.c*m2.relqual.c + 
+                            m2.subjhealth.c  + 
+                            gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c +
+                            m1.relqual.c + m2.relyears.c +
+                         
+                   center(m2.sensecon) + 
+                   center(m2.lifesat) + 
+                   center(m2.psycwb) + 
+                    center(m2.agreeable) + 
+                    center(m2.conscientious)
+                     ,
+                   
+                   data = m)
+
+
+summary(memmodel_m2_comp)
+```
+
+```{r Memory m2 competitor analyses, interaction with sense of control}
+lm(memperf.z ~  m2.ageave.c*m2.agebias.c*m2.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m1.relqual.c + m2.relyears.c +
+                      
+                  m2.ageave.c*m2.agebias.c*center(m2.sensecon) ,
+                    
+                    
+                    data = m) %>% summary() 
+```
+
+```{r Memory m2 competitor analyses, interaction with agreeableness}
+lm(memperf.z ~  m2.ageave.c*m2.agebias.c*m2.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m1.relqual.c + m2.relyears.c +
+                      
+                  m2.ageave.c*m2.agebias.c*center(m2.agreeable) ,
+                    
+                    
+                    data = m) %>% summary()
+```
+
+```{r Memory m2 competitor analyses, interaction with conscientiousness}
+lm(memperf.z ~  m2.ageave.c*m2.agebias.c*m2.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m1.relqual.c + m2.relyears.c +
+                      
+                  m2.ageave.c*m2.agebias.c*center(m2.conscientious) ,
+                    
+                    
+                    data = m) %>% summary() 
+```
+
+
+
+```{r Memory m2 competitor analyses, interaction with life satis}
+lm(memperf.z ~  m2.ageave.c*m2.agebias.c*m2.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m1.relqual.c + m2.relyears.c +
+                      
+                  m2.ageave.c*m2.agebias.c*center(m2.lifesat) ,
+                    
+                    
+                    data = m) %>% summary() 
+```
+
+```{r Memory m2 competitor analyses, interaction with psych wb}
+lm(memperf.z ~  m2.ageave.c*m2.agebias.c*m2.relqual.c + 
+                    m2.subjhealth.c  + 
+                    gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                    m1.relqual.c + m2.relyears.c +
+                      
+                  m2.ageave.c*m2.agebias.c*center(m2.psycwb) ,
+                    
+                    
+                    data = m) %>% summary() 
+```
+
+### Analyses with Relative Subjective Age (SAB-PD)
+- Using relative subjective age
+```{r Memory M2 relative subj age}
+memmodel_m2_relsubjage <- lm(memperf.z ~ m2.relsubjage.c*m2.relqual.c + 
+                            m2.subjhealth.c  + 
+                            gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c +
+                            m1.relqual.c + m2.relyears.c, data = m)
+summary(memmodel_m2_relsubjage)
+```
+
+
+```{r Memory M2 relative subj age nocov}
+memmodel_m2_relsubjage_nocov <- lm(memperf.z ~ m2.relsubjage.c*m2.relqual.c, data = memmodel_m2_relsubjage$model)
+summary(memmodel_m2_relsubjage_nocov)
+```
+
+
+```{r Memory M2 relative subj age MEs}
+memmodel_m2_relsubjage_mes <- lm(memperf.z ~ m2.relsubjage.c+m2.relqual.c, data = memmodel_m2_relsubjage$model)
+summary(memmodel_m2_relsubjage_mes)
+```
+
+### Controlling for time since Wave 2
+- Using time since Wave 2 as a covariate 
+```{r Memory analysis controlling for time since Wave 2}
+memmodel_time <- lm(memperf.z ~ m2.ageave.c*m2.agebias.c*m2.relqual.c + 
+                 m2.subjhealth.c  + 
+                 gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                 m1.relqual.c + m2.relyears.c + 
+                 cog_to_m2.c, data = m)
+summary(memmodel_time)
+```
+
+### Using Marital Status as covariate
+- Using marital status (married vs. not) as control variable
+```{r Memory M2 martial status with sample in relationship}
+memmodel_m2_stat <- lm(memperf.z ~  m2.ageave.c*m2.agebias.c*m2.relqual.c + 
+                            m2.subjhealth.c  + 
+                            gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c +
+                            m1.relqual.c + m2.relyears.c + 
+                          m2.marstat, data = m)
+summary(memmodel_m2_stat)
+
+table(memmodel_m2_stat$model$m2.marstat)
+```
+### Analyses with Chronological Age
+- Using chronological age instead of age level
+```{r}
+lm(memperf.z ~ m2.age.c*m2.agebias.c*m2.relqual.c + 
+                 m2.subjhealth.c  + 
+                 gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                 m1.relqual.c + m2.relyears.c, data = m) %>% summary()
+
+```
+
+# Tables Output
+
+## Main Text Tables Output
+```{r Main Tables Output HRV M1, results = "hide", echo = F}
+
+hrvmodel_sum_m1 <- kzregtable_3digits(hrvmodel_m1)
+hrvmodel_sum_ncov_m1 <- kzregtable_3digits(hrvmodel_m1_nocov)
+hrvmodel_sum_mes_m1 <- kzregtable_3digits(hrvmodel_m1_mes)
+
+write.csv(hrvmodel_sum_m1, "hrv_m1_table.csv", row.names = F)
+write.csv(hrvmodel_sum_ncov_m1, "hrv_m1_table_nocov.csv", row.names = F)
+write.csv(hrvmodel_sum_mes_m1, "hrv_m1_table_mes.csv", row.names = F)
+
+```
+
+
+```{r Main Tables Output HRV M2, results = "hide", echo = F}
+hrvmodel_sum_m2 <- kzregtable_3digits(hrvmodel)
+hrvmodel_sum_ncov_m2 <- kzregtable_3digits(hrvmodel_m2_nocov)
+hrvmodel_sum_mes_m2 <- kzregtable_3digits(hrvmodel_m2_mes)
+
+write.csv(hrvmodel_sum_m2, "hrv_m2_table.csv", row.names = F)
+write.csv(hrvmodel_sum_ncov_m2, "hrv_m2_table_nocov.csv", row.names = F)
+write.csv(hrvmodel_sum_mes_m2, "hrv_m2_table_mes.csv", row.names = F)
+
+```
+
+```{r Main Tables Output Memory M1, results = "hide", echo = F}
+memmodel_sum_m1 <- kzregtable_3digits(memmodel_m1)
+memmodel_sum_ncov_m1 <- kzregtable_3digits(memmodel_m1_nocov)
+memmodel_sum_mes_m1 <- kzregtable_3digits(memmodel_m1_mes)
+
+write.csv(memmodel_sum_m1, "mem_m1_table.csv", row.names = F)
+write.csv(memmodel_sum_ncov_m1, "mem_m1_table_nocov.csv", row.names = F)
+write.csv(memmodel_sum_mes_m1, "mem_m1_table_mes.csv", row.names = F)
+
+```
+
+```{r Main Tables Output Memory M2, results = "hide", echo = F}
+memmodel_sum_m2 <- kzregtable_3digits(memmodel)
+memmodel_sum_ncov_m2 <- kzregtable_3digits(memmodel_nocov)
+memmodel_sum_mes_m2 <- kzregtable_3digits(memmodel_m2_mes)
+
+write.csv(memmodel_sum_m2, "mem_m2_table.csv", row.names = F)
+write.csv(memmodel_sum_ncov_m2, "mem_m2_table_nocov.csv", row.names = F)
+write.csv(memmodel_sum_mes_m2, "mem_m2_table_mes.csv", row.names = F)
+
+```
+
+
+## Simple Slopes Tables Output - M1
+```{r Simple Slopes M1}
+
+### HRV simple slopes
+hrvmodel_m1_1SD <- as.data.frame(condslope("m1.agebias.c", "m1.relqual.c", sd(m$m1.relqual.c, na.rm= T), hrvmodel_m1))
+hrvmodel_m1_mean <- as.data.frame(condslope("m1.agebias.c", "m1.relqual.c", mean(m$m1.relqual.c, na.rm= T), hrvmodel_m1))
+hrvmodel_m1_m1SD <- as.data.frame(condslope("m1.agebias.c", "m1.relqual.c", -1*sd(m$m1.relqual.c, na.rm= T), hrvmodel_m1))
+hrvmodel_m1_m2SD <- as.data.frame(condslope("m1.agebias.c", "m1.relqual.c", -2*sd(m$m1.relqual.c, na.rm= T), hrvmodel_m1))
+hrvmodel_m1_min <- as.data.frame(condslope("m1.agebias.c", "m1.relqual.c", min(m$m1.relqual.c, na.rm= T), hrvmodel_m1))
+hrvmodel_m1_max <- as.data.frame(condslope("m1.agebias.c", "m1.relqual.c", max(m$m1.relqual.c, na.rm= T), hrvmodel_m1))
+
+
+hrvmodel_m1_ss <- rbind(hrvmodel_m1_max, hrvmodel_m1_1SD, hrvmodel_m1_mean, hrvmodel_m1_m1SD, hrvmodel_m1_m2SD, hrvmodel_m1_min)
+
+hrvmodel_m1_ss$level <- c("Max. Observed", "+1 SD", "Mean", "-1 SD", "-2 SD", "Min. Observed")
+hrvmodel_m1_ss$val <- c(max(m$m1.relqual, na.rm= T), mean(m$m1.relqual, na.rm= T)+sd(m$m1.relqual, na.rm= T), 
+                        mean(m$m1.relqual, na.rm= T), mean(m$m1.relqual, na.rm= T) -1*sd(m$m1.relqual, na.rm= T),
+                        mean(m$m1.relqual, na.rm= T)-2*sd(m$m1.relqual, na.rm= T),  min(m$m1.relqual, na.rm= T))
+hrvmodel_m1_ss$val <- format(round(hrvmodel_m1_ss$val, digits = 3), nsmall = 3)
+hrvmodel_m1_ss$dv <- "hrv"
+
+
+
+### Memory simple slopes
+memmodel_m1_1SD <- as.data.frame(condslope("m1.agebias.c", "m1.relqual.c", sd(m$m1.relqual.c, na.rm= T), memmodel_m1))
+memmodel_m1_mean <- as.data.frame(condslope("m1.agebias.c", "m1.relqual.c", mean(m$m1.relqual.c, na.rm= T), memmodel_m1))
+memmodel_m1_m1SD <- as.data.frame(condslope("m1.agebias.c", "m1.relqual.c", -1*sd(m$m1.relqual.c, na.rm= T), memmodel_m1))
+memmodel_m1_m2SD <- as.data.frame(condslope("m1.agebias.c", "m1.relqual.c", -2*sd(m$m1.relqual.c, na.rm= T), memmodel_m1))
+memmodel_m1_min <- as.data.frame(condslope("m1.agebias.c", "m1.relqual.c", min(m$m1.relqual.c, na.rm= T), memmodel_m1))
+memmodel_m1_max <- as.data.frame(condslope("m1.agebias.c", "m1.relqual.c", max(m$m1.relqual.c, na.rm= T), memmodel_m1))
+
+
+memmodel_m1_ss <- rbind(memmodel_m1_max, memmodel_m1_1SD, memmodel_m1_mean, memmodel_m1_m1SD, memmodel_m1_m2SD, memmodel_m1_min)
+
+memmodel_m1_ss$level <- c("Max. Observed", "+1 SD", "Mean", "-1 SD", "-2 SD", "Min. Observed")
+memmodel_m1_ss$val <- c(max(m$m1.relqual, na.rm= T), mean(m$m1.relqual, na.rm= T)+sd(m$m1.relqual, na.rm= T), 
+                        mean(m$m1.relqual, na.rm= T), mean(m$m1.relqual, na.rm= T) -1*sd(m$m1.relqual, na.rm= T),
+                        mean(m$m1.relqual, na.rm= T)-2*sd(m$m1.relqual, na.rm= T),  min(m$m1.relqual, na.rm= T))
+memmodel_m1_ss$val <- format(round(memmodel_m1_ss$val, digits = 3), nsmall = 3)
+memmodel_m1_ss$dv <- "mem"
+
+
+
+
+##### Simple Slopes summary table
+
+ss_sum_m1_all <- rbind(memmodel_m1_ss, hrvmodel_m1_ss)
+ss_sum_m1_all$DV <- ifelse(ss_sum_m1_all$dv == "hrv", "HRV", "Memory")
+ss_sum_m1 <- dplyr::select(ss_sum_m1_all, DV, level, val, w1.slope, t.val, p.val, lower95, upper95)
+colnames(ss_sum_m1) <- c("DV", "Level", "Value", "Estimate", "t", "p", "Lower", "Upper")
+write.csv(ss_sum_m1, "ss_sum_m1.csv", row.names = F)
+
+
+```
+
+
+## Simple Slopes Tables Output - M2
+```{r Simple Slopes M2}
+
+### HRV simple slopes
+hrvmodel_1SD <- as.data.frame(condslope("m2.agebias.c", "m2.relqual.c", sd(m$m2.relqual.c, na.rm= T), hrvmodel))
+hrvmodel_mean <- as.data.frame(condslope("m2.agebias.c", "m2.relqual.c", mean(m$m2.relqual.c, na.rm= T), hrvmodel))
+hrvmodel_m1SD <- as.data.frame(condslope("m2.agebias.c", "m2.relqual.c", -1*sd(m$m2.relqual.c, na.rm= T), hrvmodel))
+hrvmodel_m2SD <- as.data.frame(condslope("m2.agebias.c", "m2.relqual.c", -2*sd(m$m2.relqual.c, na.rm= T), hrvmodel))
+hrvmodel_min <- as.data.frame(condslope("m2.agebias.c", "m2.relqual.c", min(m$m2.relqual.c, na.rm= T), hrvmodel))
+hrvmodel_max <- as.data.frame(condslope("m2.agebias.c", "m2.relqual.c", max(m$m2.relqual.c, na.rm= T), hrvmodel))
+
+
+hrvmodel_ss <- rbind(hrvmodel_max, hrvmodel_1SD, hrvmodel_mean, hrvmodel_m1SD, hrvmodel_m2SD, hrvmodel_min)
+
+hrvmodel_ss$level <- c("Max. Observed", "+1 SD", "Mean", "-1 SD", "-2 SD", "Min. Observed")
+hrvmodel_ss$val <- c(max(m$m2.relqual, na.rm= T), mean(m$m2.relqual, na.rm= T)+sd(m$m2.relqual, na.rm= T), 
+                     mean(m$m2.relqual, na.rm= T), mean(m$m2.relqual, na.rm= T) -1*sd(m$m2.relqual, na.rm= T),
+                     mean(m$m2.relqual, na.rm= T)-2*sd(m$m2.relqual, na.rm= T),  min(m$m2.relqual, na.rm= T))
+hrvmodel_ss$val <- format(round(hrvmodel_ss$val, digits = 3), nsmall = 3)
+hrvmodel_ss$dv <- "hrv"
+
+
+
+### Memory simple slopes
+memmodel_1SD <- as.data.frame(condslope("m2.agebias.c", "m2.relqual.c", sd(m$m2.relqual.c, na.rm= T), memmodel))
+memmodel_mean <- as.data.frame(condslope("m2.agebias.c", "m2.relqual.c", mean(m$m2.relqual.c, na.rm= T), memmodel))
+memmodel_m1SD <- as.data.frame(condslope("m2.agebias.c", "m2.relqual.c", -1*sd(m$m2.relqual.c, na.rm= T), memmodel))
+memmodel_m2SD <- as.data.frame(condslope("m2.agebias.c", "m2.relqual.c", -2*sd(m$m2.relqual.c, na.rm= T), memmodel))
+memmodel_min <- as.data.frame(condslope("m2.agebias.c", "m2.relqual.c", min(m$m2.relqual.c, na.rm= T), memmodel))
+memmodel_max <- as.data.frame(condslope("m2.agebias.c", "m2.relqual.c", max(m$m2.relqual.c, na.rm= T), memmodel))
+
+
+memmodel_ss <- rbind(memmodel_max, memmodel_1SD, memmodel_mean, memmodel_m1SD, memmodel_m2SD, memmodel_min)
+
+memmodel_ss$level <- c("Max. Observed", "+1 SD", "Mean", "-1 SD", "-2 SD", "Min. Observed")
+memmodel_ss$val <- c(max(m$m2.relqual, na.rm= T), mean(m$m2.relqual, na.rm= T)+sd(m$m2.relqual, na.rm= T), 
+                     mean(m$m2.relqual, na.rm= T), mean(m$m2.relqual, na.rm= T) -1*sd(m$m2.relqual, na.rm= T),
+                     mean(m$m2.relqual, na.rm= T)-2*sd(m$m2.relqual, na.rm= T),  min(m$m2.relqual, na.rm= T))
+memmodel_ss$val <- format(round(memmodel_ss$val, digits = 3), nsmall = 3)
+memmodel_ss$dv <- "mem"
+
+
+
+
+##### Simple Slopes summary table
+
+ss_sum_all <- rbind(memmodel_ss, hrvmodel_ss)
+ss_sum_all$DV <- ifelse(ss_sum_all$dv == "hrv", "HRV", "Memory")
+ss_sum <- dplyr::select(ss_sum_all, DV, level, val, w1.slope, t.val, p.val, lower95, upper95)
+colnames(ss_sum) <- c("DV", "Level", "Value", "Estimate", "t", "p", "Lower", "Upper")
+write.csv(ss_sum, "ss_sum_m2.csv", row.names = F)
+
+
+```
+
+
+
+## Output for Analyses with Different Operationalization of Subjective Age Bias (Supplement)
+- Subjective Age Bias/Chronological Age
+```{r Rel Subjective Age Results Tables}
+
+### HRV Analyses ###
+write.csv(kzregtable_3digits(hrvmodel_m1_relsubjage), "hrvrelsubage_m1_table.csv", row.names = F)
+write.csv(kzregtable_3digits(hrvmodel_m1_relsubjage_nocov), "hrvrelsubage_m1_table_nocov.csv", row.names = F)
+write.csv(kzregtable_3digits(hrvmodel_m1_relsubjage_mes), "hrvrelsubage_m1_table_mes.csv", row.names = F)
+
+write.csv(kzregtable_3digits(hrvmodel_m2_relsubjage), "hrvrelsubage_m2_table.csv", row.names = F)
+write.csv(kzregtable_3digits(hrvmodel_m2_relsubjage_nocov), "hrvrelsubage_m2_table_nocov.csv", row.names = F)
+write.csv(kzregtable_3digits(hrvmodel_m2_relsubjage_mes), "hrvrelsubage_m2_table_mes.csv", row.names = F)
+
+
+
+### Memory Analyses ###
+write.csv(kzregtable_3digits(memmodel_m1_relsubjage), "memrelsubage_m1_table.csv", row.names = F)
+write.csv(kzregtable_3digits(memmodel_m1_relsubjage_nocov), "memrelsubage_m1_table_nocov.csv", row.names = F)
+write.csv(kzregtable_3digits(memmodel_m1_relsubjage_mes), "memrelsubage_m1_table_mes.csv", row.names = F)
+
+write.csv(kzregtable_3digits(memmodel_m2_relsubjage), "memrelsubage_m2_table.csv", row.names = F)
+write.csv(kzregtable_3digits(memmodel_m2_relsubjage_nocov), "memrelsubage_m2_table_nocov.csv", row.names = F)
+write.csv(kzregtable_3digits(memmodel_m2_relsubjage_mes), "memrelsubage_m2_table_mes.csv", row.names = F)# 
+
+```
+
+# Comparing Interaction Effects across Waves
+
+```{r}
+difftest_lm <- function(x1, x2, model){
+  diffest <- summary(model)$coef[x1,"Estimate"]-summary(model)$coef[x2,"Estimate"]
+  vardiff <- (summary(model)$coef[x1,"Std. Error"]^2 + 
+                summary(model)$coef[x2,"Std. Error"]^2) - (2*(vcov(model)[x1, x2])) 
+  # variance of x1 + variance of x2 - 2*covariance of x1 and x2
+  diffse <- sqrt(vardiff)
+  tdiff <- (diffest)/(diffse)
+  ptdiff <- 2*(1-pt(abs(tdiff), model$df, lower.tail=T))
+  upr <- diffest + 1.96*diffse
+  lwr <- diffest - 1.96*diffse 
+  df <- model$df
+  return(list(est=round(diffest, digits = 3), 
+              t=round(tdiff, digits = 2), 
+              p=round(ptdiff, digits = 3), 
+              lwr=round(lwr, digits = 3), 
+              upr=round(upr, digits = 3),
+              df = df))
+}
+
+```
+
+## HRV Waves 1 and 2 comparison
+```{r}
+
+#### stack models / data ####
+
+
+hrvm1_sub <- select(m, hrvavelog,  m1.ageave.c, m1.agebias.c, m1.relqual.c,  
+  m2.subjhealth.c, gender, bmi.c, diaghd, smoker, diaghighbp,  m2.edu.c,
+  m2.relqual.c ,  m1.relyears.c)
+
+colnames(hrvm1_sub) <- c("hrvavelog", "ageave", "agebias", "relqual", "subjhealth",
+                         "gender", "bmi", "diaghd", "smoker", "diaghighbp", "edu",
+                         "relqual_other", "relyears")
+hrvm1_sub$m1 <- 1
+hrvm1_sub$m2 <- 0
+
+hrvm2_sub <- select(m, hrvavelog,  m2.ageave.c, m2.agebias.c, m2.relqual.c,  
+                    m2.subjhealth.c, gender, bmi.c, diaghd, smoker, diaghighbp,
+                    m2.edu.c, m1.relqual.c, m2.relyears.c)
+colnames(hrvm2_sub) <- c("hrvavelog", "ageave", "agebias", "relqual", "subjhealth",
+                         "gender", "bmi", "diaghd", "smoker", "diaghighbp", "edu",
+                         "relqual_other", "relyears")
+hrvm2_sub$m1 <- 0
+hrvm2_sub$m2 <- 1
+
+hrv_stack <- rbind(hrvm1_sub, hrvm2_sub)
+
+hrvstackmodel <- lm(hrvavelog ~ 0 + m1 + m2 +
+                  m1:ageave * m1:agebias * m1:relqual + m1:subjhealth + m1:gender +
+                  m1:bmi + m1:diaghd + m1:smoker + m1:diaghighbp + m1:edu +
+                  m1:relqual_other + m1:relyears +
+                  
+                  m2:ageave * m2:agebias * m2:relqual + m2:subjhealth + m2:gender +
+                  m2:bmi + m2:diaghd + m2:smoker + m2:diaghighbp + m2:edu +
+                  m2:relqual_other + m2:relyears,
+                data = hrv_stack)
+
+summary(hrvstackmodel)
+
+hrvdiff <- data.frame(difftest_lm("m1:agebias:relqual", "m2:agebias:relqual", hrvstackmodel))
+hrvdiff
+
+
+```
+
+## Memory Performance Waves 1 and 2 comparison
+
+```{r}
+#### stack models / memperf ####
+
+
+memm1_sub <- select(m, memperf.z,  m1.ageave.c, m1.agebias.c, m1.relqual.c ,  
+                    m2.subjhealth.c ,  
+                    gender ,  bmi.c ,  diaghd ,  smoker ,  diaghighbp ,  m2.edu.c ,  
+                    m2.relqual.c ,  m1.relyears.c)
+colnames(memm1_sub) <- c("memperf.z", "ageave", "agebias", "relqual", "subjhealth",
+                         "gender", "bmi", "diaghd", "smoker", "diaghighbp", "edu",
+                         "relqual_other", "relyears")
+memm1_sub$m1 <- 1
+memm1_sub$m2 <- 0
+
+memm2_sub <- select(m, memperf.z,  m2.ageave.c, m2.agebias.c, m2.relqual.c,  
+                    m2.subjhealth.c, gender, bmi.c,  diaghd,  smoker,  diaghighbp,
+                    m2.edu.c, m1.relqual.c, m2.relyears.c)
+colnames(memm2_sub) <- c("memperf.z", "ageave", "agebias", "relqual", "subjhealth",
+                         "gender", "bmi", "diaghd", "smoker", "diaghighbp", "edu",
+                         "relqual_other", "relyears")
+memm2_sub$m1 <- 0
+memm2_sub$m2 <- 1
+
+mem_stack <- rbind(memm1_sub, memm2_sub)
+
+
+memstackmodel <- lm(memperf.z ~ 0 + m1 + m2 +
+                  m1:ageave * m1:agebias * m1:relqual + m1:subjhealth + m1:gender +
+                  m1:bmi + m1:diaghd + m1:smoker + m1:diaghighbp + m1:edu +
+                  m1:relqual_other + m1:relyears +
+                  
+                  m2:ageave * m2:agebias * m2:relqual + m2:subjhealth + m2:gender +
+                  m2:bmi + m2:diaghd + m2:smoker + m2:diaghighbp + m2:edu +
+                  m2:relqual_other + m2:relyears,
+                data = mem_stack)
+
+summary(memstackmodel)
+memdiff <- data.frame(difftest_lm("m1:agebias:relqual", "m2:agebias:relqual", memstackmodel))
+memdiff
+
+
+```
+
+
+# Selectivity Analyses and Comparison of Analtyic Sample to Full Sample
+- Aggregating IDs across analyses
+```{r aggregating across analyses}
+
+hrv2 <- hrvmodel$model
+hrv2$id2 <- row.names(hrv2)
+hrv2$hrv2m <- 1
+
+  
+hrv1 <- hrvmodel_m1$model 
+hrv1$id2 <- row.names(hrv1)
+hrv1$hrv1m <- 1
+
+
+mem2 <- memmodel$model
+mem2$id2 <- row.names(mem2)
+mem2$mem2m <- 1
+
+mem1 <- memmodel_m1$model 
+mem1$id2 <- row.names(mem1)
+mem1$mem1m <- 1
+
+
+
+
+df1 <- full_join(
+  select(hrv1, id2, hrv1m, hrvavelog),
+  select(hrv2, id2, hrv2m, hrvavelog),
+  by = "id2"
+)
+
+df2 <- full_join(
+  df1,
+  select(mem1, id2, mem1m),
+  by = "id2"
+  
+  
+)
+
+df3 <- full_join(
+  df2,
+  select(mem2, id2, mem2m),
+  by = "id2"
+  
+  
+)
+
+```
+
+## Number of common participants across analyses
+```{r Common N across analyses}
+df3$s <- rowSums(cbind(df3$hrv1m, df3$hrv2m, df3$mem1m, df3$mem2m), na.rm = T)
+table(df3$s)
+sum(table(df3$s))
+df3$id2 <- as.integer(df3$id2)
+
+sum(table(df3$s))-table(df3$s)["4"]
+
+```
+
+##  Comparing individuals who contributed data to all analyses vs. not.
+```{r}
+
+m$id2 <- as.integer(row.names(m))
+m_samp1 <- full_join(df3, m, by = "id2")
+m_samp <- subset(m_samp1, is.na(s) == F) 
+
+
+m_samp$allmodels = ifelse(m_samp$s == 4, 1, 0)
+
+lm(hrvavelog ~ allmodels, data = m_samp) %>% summary # NS
+
+lm(m1.relqual ~ allmodels, data =  m_samp) %>% summary # NS
+lm(m2.relqual ~ allmodels, data =  m_samp) %>% summary # NS
+
+lm(memperf.z ~ allmodels, data =  m_samp) %>% summary # group in all analyses performed better
+lm(m1.age ~ allmodels, data =  m_samp) %>% summary # group in all analyses were younger
+lm(m2.age ~ allmodels, data =  m_samp) %>% summary # group in all analyses were younger
+
+
+```
+
+```{r attrition table creation}
+att_age_m1 <- t.test.table(m_samp$m1.age, m_samp$allmodels, "Age (Wave 1)")
+att_age_m2 <- t.test.table(m_samp$m2.age, m_samp$allmodels, "Age (Wave 2)")
+att_subage_m1 <- t.test.table(m_samp$m1.agebias, m_samp$allmodels, "Subj. Age Bias (Wave 1)")
+att_subage_m2 <- t.test.table(m_samp$m2.agebias, m_samp$allmodels, "Subj. Age Bias (Wave 2)")
+att_relqual_m1 <- t.test.table(m_samp$m1.relqual, m_samp$allmodels, "Relationship Quality (Wave 1)")
+att_relqual_m2 <- t.test.table(m_samp$m2.relqual, m_samp$allmodels, "Relationship Quality (Wave 2)")
+att_mem <- t.test.table(m_samp$memperf.z, m_samp$allmodels, "Memory Performance")
+att_hrv <- t.test.table(m_samp$hrvavelog, m_samp$allmodels, "HRV")
+
+att.table <- rbind(att_age_m1, att_age_m2,
+                   att_subage_m1, att_subage_m2,
+                   att_relqual_m1, att_relqual_m2,
+                   att_mem, att_hrv)
+
+
+att.table <- cbind(att.table, 
+  
+  sd_ns = c(sd(subset(m_samp,allmodels == 0)$m1.age, na.rm=T), 
+            sd(subset(m_samp,allmodels == 0)$m2.age, na.rm=T),
+            sd(subset(m_samp,allmodels == 0)$m1.agebias, na.rm=T),
+            sd(subset(m_samp,allmodels == 0)$m2.agebias, na.rm=T),
+            sd(subset(m_samp,allmodels == 0)$m1.relqual, na.rm=T),
+            sd(subset(m_samp,allmodels == 0)$m2.relqual, na.rm=T),
+            sd(subset(m_samp,allmodels == 0)$memperf.z, na.rm=T),
+            sd(subset(m_samp,allmodels == 0)$hrvavelog, na.rm=T)),
+
+  sd_s = c(sd(subset(m_samp,allmodels == 1)$m1.age, na.rm=T), 
+            sd(subset(m_samp,allmodels == 1)$m2.age, na.rm=T),
+            sd(subset(m_samp,allmodels == 1)$m1.agebias, na.rm=T),
+            sd(subset(m_samp,allmodels == 1)$m2.agebias, na.rm=T),
+            sd(subset(m_samp,allmodels == 1)$m1.relqual, na.rm=T),
+            sd(subset(m_samp,allmodels == 1)$m2.relqual, na.rm=T),
+            sd(subset(m_samp,allmodels == 1)$memperf.z, na.rm=T),
+            sd(subset(m_samp,allmodels == 1)$hrvavelog, na.rm=T))
+
+) %>% 
+      mutate_if(is.numeric, funs(round(., digits = 3))) %>% 
+  select(varname, estimate1, sd_ns, estimate2, sd_s, everything())
+
+colnames(att.table) <- c("Variable", "Mean - Some", "SD - Some", "Mean - All", "SD - All", "Difference", "t", "df", "p", "Lower 95%", "Upper 95%", "Cohen's d")
+
+att.table
+write.csv(att.table, "attrition_analyses_table.csv", row.names = F)
+```
+
+```{r}
+chisq.test(table(m_samp$m2.gender, m_samp$allmodels))
+att.gender <- chisq.test(table(m_samp$m2.gender, m_samp$allmodels))
+
+# no gender diffs
+```
+
+
+```{r}
+hrvandrqm1 <- subset(m, is.na(hrvavelog) == F & is.na(m1.relqual) == F & is.na(m1.subage) == F)
+nrow(hrvandrqm1)
+
+
+hrvandrqm2 <- subset(m, is.na(hrvavelog) == F & is.na(m2.relqual) == F & is.na(m2.subage) == F)
+nrow(hrvandrqm2)
+```
+
+## Comparing participants in analyses to those not in the analyses
+```{r Comparing analytic sample to full sample}
+m$id2 <- as.integer(row.names(m))
+
+m$insamp <- ifelse(is.element( m$id2, df3$id2) == T, 1, 0)
+table(m$insamp)
+```
+
+```{r t-test tables for selection analysis}
+
+
+sampage_m1 <- t.test.table(m$m1.age, m$insamp, "Age (Wave 1)")
+sampage_m2 <- t.test.table(m$m2.age, m$insamp, "Age (Wave 2)")
+sampsubjage_m1 <- t.test.table(m$m1.agebias, m$insamp, "Subj. Age Bias (Wave 1)")
+sampsubjage_m2 <- t.test.table(m$m2.agebias, m$insamp, "Subj. Age Bias (Wave 2)")
+samprelqual_m1 <- t.test.table(m$m1.relqual, m$insamp, "Relationship Quality (Wave 1)")
+samprelqual_m2 <- t.test.table(m$m2.relqual, m$insamp, "Relationship Quality (Wave 2)")
+sampmemperf <- t.test.table(m$memperf.z, m$insamp, "Memory Performance")
+samphrv <- t.test.table(m$hrvavelog, m$insamp, "HRV")
+
+samptable <- rbind(sampage_m1, sampage_m2, sampsubjage_m1 , sampsubjage_m2,
+                   samprelqual_m1, samprelqual_m2,
+                   sampmemperf, samphrv)
+
+
+samptable <- cbind(samptable, 
+  
+  sd_ns = c(sd(subset(m, insamp == 0)$m1.age, na.rm=T), 
+            sd(subset(m, insamp == 0)$m2.age, na.rm=T),
+            sd(subset(m, insamp == 0)$m1.agebias, na.rm=T),
+            sd(subset(m, insamp == 0)$m2.agebias, na.rm=T),
+            sd(subset(m, insamp == 0)$m1.relqual, na.rm=T),
+            sd(subset(m, insamp == 0)$m2.relqual, na.rm=T),
+            sd(subset(m, insamp == 0)$memperf.z, na.rm=T),
+            sd(subset(m, insamp == 0)$hrvavelog, na.rm=T)),
+
+  sd_s = c(sd(subset(m, insamp == 1)$m1.age, na.rm=T), 
+            sd(subset(m, insamp == 1)$m2.age, na.rm=T),
+            sd(subset(m, insamp == 1)$m1.agebias, na.rm=T),
+            sd(subset(m, insamp == 1)$m2.agebias, na.rm=T),
+            sd(subset(m, insamp == 1)$m1.relqual, na.rm=T),
+            sd(subset(m, insamp == 1)$m2.relqual, na.rm=T),
+            sd(subset(m, insamp == 1)$memperf.z, na.rm=T),
+            sd(subset(m, insamp == 1)$hrvavelog, na.rm=T))
+
+) %>% 
+      mutate_if(is.numeric, funs(round(., digits = 3))) %>% 
+  select(varname, estimate1, sd_ns, estimate2, sd_s, everything())
+
+colnames(samptable) <- c("Variable", "Mean - NS", "SD - NS", "Mean - S", "SD - S", "Difference", "t", "df", "p", "Lower 95%", "Upper 95%", "Cohen's d")
+
+samptable
+write.csv(samptable, "selectivity_analyses_table.csv", row.names = F)
+
+```
+
+## Gender composition of the sample
+```{r}
+chisq.test(table(m$m2.gender, m$insamp))
+table(m$m2.gender, m$insamp) 
+
+chisq.test(table(subset(m, insamp ==1)$m2.gender)) 
+table(subset(m, insamp == 1)$m2.gender) 
+
+```
+
+
+# Quadratic age effects
+- HRV 
+```{r HRV quadratic age effects}
+
+m$m1.ageave.qd <- m$m1.ageave.c^2
+lm(hrvavelog ~ m1.ageave.c*m1.agebias.c*m1.relqual.c + 
+                 m2.subjhealth.c  + 
+                 gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                 m2.relqual.c + m1.relyears.c + 
+     m1.ageave.qd + m1.ageave.qd:m1.relqual.c, data = m) %>% summary()
+```
+
+```{r}
+lm(hrvavelog ~ center(m1.ageave.qd)*m1.agebias.c*m1.relqual.c + 
+                 m2.subjhealth.c  + 
+                 gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                 m2.relqual.c + m1.relyears.c, data = m) %>% summary()
+```
+
+```{r}
+m$m2.ageave.qd <- m$m2.ageave.c^2
+lm(hrvavelog ~ m2.ageave.c*m2.agebias.c*m2.relqual.c + 
+                 m2.subjhealth.c  + 
+                 gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                 m1.relqual.c + m2.relyears.c +
+     m2.ageave.qd + m2.ageave.qd:m2.relqual.c, data = m) %>% summary()
+```
+
+```{r}
+lm(hrvavelog ~ center(m2.ageave.qd)*m2.agebias.c*m2.relqual.c + 
+                 m2.subjhealth.c  + 
+                 gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                 m1.relqual.c + m2.relyears.c, data = m) %>% summary()
+
+
+```
+
+- Memory Performance
+```{r Memory performance quadratic age effects}
+
+lm(memperf.z~ m1.ageave.c*m1.agebias.c*m1.relqual.c + 
+                 m2.subjhealth.c  + 
+                 gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                 m2.relqual.c + m1.relyears.c + 
+     m1.ageave.qd + m1.ageave.qd:m1.relqual.c, data = m) %>% summary()
+```
+
+      
+```{r}
+
+lm(memperf.z ~ center(m1.ageave.qd)*m1.agebias.c*m1.relqual.c + 
+                 m2.subjhealth.c  + 
+                 gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                 m2.relqual.c + m1.relyears.c, data = m) %>% summary()
+```
+
+```{r}
+lm(memperf.z ~ m2.ageave.c*m2.agebias.c*m2.relqual.c + 
+                 m2.subjhealth.c  + 
+                 gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                 m1.relqual.c + m2.relyears.c +
+     m2.ageave.qd + m2.ageave.qd:m2.relqual.c, data = m) %>% summary()
+```
+
+```{r}
+lm(memperf.z ~ center(m2.ageave.qd)*m2.agebias.c*m2.relqual.c + 
+                 m2.subjhealth.c  + 
+                 gender + bmi.c + diaghd + smoker + diaghighbp + m2.edu.c + 
+                 m1.relqual.c + m2.relyears.c, data = m) %>% summary()
+
+
+```
+
+
